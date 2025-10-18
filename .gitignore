@@ -1,0 +1,5 @@
+__pycache__/
+Qwen_**/
+venv/
+.env
+node_modules/

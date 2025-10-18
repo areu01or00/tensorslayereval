@@ -1,0 +1,24 @@
+# Core dependencies
+torch>=2.0.0
+transformers>=4.35.0
+safetensors>=0.4.0
+huggingface_hub>=0.21.0
+datasets>=2.18.0
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
+
+# AI capabilities
+smolagents>=0.1.0
+litellm>=1.0.0
+
+# UI
+textual>=0.40.0
+rich>=13.0.0
+
+# Utilities
+python-dotenv>=1.0.0
+numpy>=1.24.0
+
+# Optional for enhanced features
+matplotlib>=3.7.0  # For visualizations
+pandas>=2.0.0  # For data handling
