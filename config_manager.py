@@ -94,6 +94,16 @@ class ConfigManager:
                 max_new_tokens=1024,
                 repetition_penalty=1.0,
                 thinking_budget=1024
+            ),
+            "benchmark": InferenceConfig(
+                name="Benchmark Mode",
+                description="Optimized for GSM8K and similar benchmarks with short answers",
+                temperature=0.3,
+                top_p=0.9,
+                top_k=30,
+                max_new_tokens=512,
+                repetition_penalty=1.0,
+                thinking_budget=1024
             )
         }
     

@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     load_dataset = None  # type: ignore
 
-API_TIMEOUT = 300  # seconds per request
+API_TIMEOUT = 900  # seconds per request (increased for hooked generations with thinking tokens)
 
 
 @dataclass
@@ -62,8 +62,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-revision", default=None, help="Optional HF revision")
     parser.add_argument(
         "--config",
-        default="balanced",
-        help="Inference configuration preset (default: balanced)",
+        default="benchmark",
+        help="Inference configuration preset (default: benchmark - optimized for short answers)",
     )
     parser.add_argument(
         "--capabilities",
@@ -296,6 +296,21 @@ def run_benchmark(args: argparse.Namespace) -> None:
         else:
             wait_for_server(base_url, timeout=10)
 
+        # Generate AI suggestions once per capability (cached for all prompts)
+        print("[bench] Generating AI suggestions for each capability...")
+        cached_suggestions = {}
+        for capability in args.capabilities:
+            print(f"[bench] → Generating suggestions for '{capability}'...")
+            suggestions_resp = api_post(
+                base_url,
+                "/api/suggestions",
+                {"capability": capability},
+            )
+            suggestions = suggestions_resp.get("suggestions", [])
+            cached_suggestions[capability] = suggestions
+            print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
+
+        print(f"[bench] Starting benchmark with {len(prompts)} prompts...")
         results: List[Dict[str, Optional[str]]] = []
 
         for item in prompts:
@@ -315,12 +330,8 @@ def run_benchmark(args: argparse.Namespace) -> None:
             for capability in args.capabilities:
                 api_delete(base_url, "/api/hooks")
 
-                suggestions_resp = api_post(
-                    base_url,
-                    "/api/suggestions",
-                    {"capability": capability},
-                )
-                suggestions = suggestions_resp.get("suggestions", [])
+                # Use cached suggestions instead of regenerating
+                suggestions = cached_suggestions.get(capability, [])
 
                 hook_resp = {"hook_count": 0}
                 if suggestions:

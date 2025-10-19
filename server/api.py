@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -12,14 +13,31 @@ from config_manager import ConfigManager
 from hook_system import HookSystem
 from model_loader import ModelLoader
 from ai_agent import ai_agent
-
-app = FastAPI(title="Inference Engine API", version="0.1.0")
+from tensor_inspector import TensorInspector
 
 _config_manager = ConfigManager()
 _model_loader = ModelLoader()
 _hook_system = HookSystem()
 _generation_lock = asyncio.Lock()
 _hooks_active = False
+_tensor_inspector: Optional[TensorInspector] = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Load the model on startup, cleanup on shutdown."""
+    model_path = os.environ.get("MODEL_PATH", "Qwen_0.6B")
+    success = await asyncio.to_thread(_model_loader.load_model, model_path)
+    if not success:
+        raise RuntimeError(f"Failed to load model from '{model_path}'")
+    _hook_system.set_model(_model_loader.model)
+    global _tensor_inspector
+    _tensor_inspector = TensorInspector(_model_loader.model)
+    yield
+    # Cleanup on shutdown (if needed)
+
+
+app = FastAPI(title="Inference Engine API", version="0.1.0", lifespan=lifespan)
 
 
 def _require_model_loaded() -> None:
@@ -27,16 +45,57 @@ def _require_model_loaded() -> None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
 
-def _get_tensor_stats() -> List[Dict[str, Any]]:
-    """Temporary tensor stats placeholder until inspector is implemented."""
-    return [
-        {
-            "name": "model.layers.10.self_attn.q_proj.weight",
-            "shape": "[4096, 4096]",
-            "mean": 0.002,
-            "std": 0.045,
-        }
-    ]
+def _get_tensor_stats(capability: str) -> List[Dict[str, Any]]:
+    if _tensor_inspector is not None:
+        stats = _tensor_inspector.sample_stats(capability=capability)
+        if stats:
+            return stats
+    return []
+
+
+def _filter_suggestions(
+    suggestions: List[Dict[str, Any]],
+    max_count: int = 20,
+    min_confidence: float = 0.65,
+) -> List[Dict[str, Any]]:
+    if not suggestions:
+        return []
+
+    def confidence(entry: Dict[str, Any]) -> float:
+        value = entry.get("confidence", 0.0)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    filtered = [entry for entry in suggestions if confidence(entry) >= min_confidence]
+    if not filtered:
+        filtered = suggestions
+
+    filtered.sort(key=confidence, reverse=True)
+    return filtered[:max_count]
+
+
+def _filter_suggestions(
+    suggestions: List[Dict[str, Any]],
+    max_count: int = 20,
+    min_confidence: float = 0.65,
+) -> List[Dict[str, Any]]:
+    if not suggestions:
+        return []
+
+    def conf(entry: Dict[str, Any]) -> float:
+        try:
+            return float(entry.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+
+    filtered = [s for s in suggestions if conf(s) >= min_confidence]
+    if not filtered:
+        filtered = suggestions
+
+    filtered.sort(key=conf, reverse=True)
+    return filtered[:max_count]
 
 
 class GeneratePayload(BaseModel):
@@ -52,7 +111,7 @@ class SuggestionPayload(BaseModel):
 class Suggestion(BaseModel):
     tensor_name: str
     operation: str
-    value: float
+    value: Optional[float] = None  # normalize operation doesn't need a value
     target: str
     confidence: Optional[float] = None
     reason: Optional[str] = None
@@ -60,18 +119,6 @@ class Suggestion(BaseModel):
 
 class ApplyHooksPayload(BaseModel):
     suggestions: List[Suggestion]
-
-
-@app.on_event("startup")
-async def startup_event() -> None:
-    """Load the model and prepare hook system when the server starts."""
-    model_path = os.environ.get("MODEL_PATH", "Qwen_0.6B")
-
-    success = await asyncio.to_thread(_model_loader.load_model, model_path)
-    if not success:
-        raise RuntimeError(f"Failed to load model from '{model_path}'")
-
-    _hook_system.set_model(_model_loader.model)
 
 
 @app.get("/api/health")
@@ -134,15 +181,17 @@ async def generate(payload: GeneratePayload) -> Dict[str, Any]:
 @app.post("/api/suggestions")
 async def get_suggestions(payload: SuggestionPayload) -> Dict[str, Any]:
     """Return AI generated tensor modification suggestions."""
-    tensor_stats = _get_tensor_stats()
+    tensor_stats = _get_tensor_stats(payload.capability)
+    if not tensor_stats:
+        return {"suggestions": []}
 
     suggestions = await asyncio.to_thread(
         ai_agent.generate_modifications,
         tensor_stats,
         payload.capability,
     )
-
-    return {"suggestions": suggestions}
+    filtered = _filter_suggestions(suggestions)
+    return {"suggestions": filtered}
 
 
 @app.post("/api/hooks")
@@ -157,7 +206,7 @@ def apply_hooks(payload: ApplyHooksPayload) -> Dict[str, Any]:
 
     for suggestion in payload.suggestions[:10]:  # limit number as in TUI
         module_name = _hook_system.tensor_name_to_module_name(suggestion.tensor_name)
-        modifications_by_module.setdefault(module_name, []).append(suggestion.dict())
+        modifications_by_module.setdefault(module_name, []).append(suggestion.model_dump())
 
     _hook_system.register_layer_hooks(modifications_by_module)
     hook_count = _hook_system.get_active_modifications_count()

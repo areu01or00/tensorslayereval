@@ -66,3 +66,19 @@ Demonstrate repeatable improvements from tensor-hook modifications on large (≥
 - CSV of baseline vs patched scores per task.
 - Markdown summary (e.g., `bench/reports/<date>.md`) with tables/plots.
 - Optional: publish raw logs + scripts for community replication.
+
+## Data Cleaning Script
+1. Create `bench/clean_results.py`.
+2. Behavior:
+   - Read `runs-backup/*.csv` (or a specified file).
+   - For each row, strip `<think>` blocks, extract the final numeric answer (regex fallback), and compare against the reference answer.
+   - Produce a normalized CSV in the same directory with additional fields: `baseline_clean`, `baseline_match`, `patched_clean`, `patched_match` per capability.
+3. CLI usage example:
+   ```bash
+   python bench/clean_results.py \
+     --input runs-backup/results-20251018-170113.csv \
+     --output runs-backup/results-20251018-170113.cleaned.csv
+   ```
+4. Optional extras:
+   - Add `--grader llm` mode to use an OpenRouter model for fuzzy validation.
+   - Generate a summary report (`.md` or `.txt`) highlighting accuracy deltas post-cleaning.

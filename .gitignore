@@ -3,3 +3,5 @@ Qwen_**/
 venv/
 .env
 node_modules/
+boilerplate/
+Issues.md
