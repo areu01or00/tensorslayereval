@@ -143,7 +143,18 @@ class HookSystem:
         
         # Handle percentage targets
         if "%" in target:
-            percentage = float(target.replace("top", "").replace("bottom", "").replace("%", "").strip())
+            cleaned = (
+                target
+                .replace("top", "")
+                .replace("bottom", "")
+                .replace("%", "")
+                .replace("_", "")
+                .strip()
+            )
+            try:
+                percentage = float(cleaned)
+            except ValueError:
+                raise ValueError(f"Invalid target percentage: {target}")
             is_top = "top" in target
             
             # Flatten tensor for percentile calculation
@@ -171,7 +182,18 @@ class HookSystem:
         
         # Similar logic to scale for targeted addition
         if "%" in target:
-            percentage = float(target.replace("top", "").replace("bottom", "").replace("%", "").strip())
+            cleaned = (
+                target
+                .replace("top", "")
+                .replace("bottom", "")
+                .replace("%", "")
+                .replace("_", "")
+                .strip()
+            )
+            try:
+                percentage = float(cleaned)
+            except ValueError:
+                raise ValueError(f"Invalid target percentage: {target}")
             is_top = "top" in target
             
             flat = tensor.flatten()
