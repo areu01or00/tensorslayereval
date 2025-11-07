@@ -108,30 +108,67 @@ Be concise and technical."""
     
     def generate_modifications(self, 
                               tensor_stats: List[Dict],
-                              capability: str = "general") -> List[Dict]:
+                              capability: str = "general",
+                              max_stats_lines: Optional[int] = None) -> List[Dict]:
         """Generate tensor modification suggestions"""
         if not self.is_available():
             # Return hardcoded fallback suggestions
             return self._get_fallback_suggestions(capability)
         
+        # Build compact stats lines (boilerplate-style) to keep the prompt lean
+        def _elem_size(dtype: str) -> int:
+            try:
+                if 'float16' in dtype or 'bfloat16' in dtype: return 2
+                if 'float32' in dtype: return 4
+                if 'float64' in dtype: return 8
+                if 'int8' in dtype: return 1
+            except Exception:
+                pass
+            return 4
+
+        lines = []
+        stats_iter = tensor_stats if max_stats_lines is None else tensor_stats[:max_stats_lines]
+        for t in stats_iter:
+            name = t.get('name') or t.get('tensor_name') or ''
+            shape = t.get('shape')
+            dtype = str(t.get('dtype', 'torch.float32'))
+            mean = t.get('mean'); std = t.get('std'); vmin = t.get('min'); vmax = t.get('max')
+            size_mb = t.get('size_mb')
+            if size_mb is None:
+                try:
+                    if isinstance(shape, str):
+                        # parse like "[4096, 4096]"
+                        dims = [int(x) for x in shape.strip('[]').split(',') if x.strip()]
+                    else:
+                        dims = list(shape) if shape else []
+                    numel = 1
+                    for d in dims: numel *= int(d)
+                    size_mb = numel * _elem_size(dtype) / (1024*1024)
+                except Exception:
+                    size_mb = 0.0
+            lines.append(
+                f"- {name}: shape={shape}, size={size_mb:.2f}MB, mean={float(mean):.4f}, std={float(std):.4f}, min={float(vmin):.4f}, max={float(vmax):.4f}"
+            )
+        stats_block = "\n".join(lines)
+
         prompt = f"""ONLY SUGGEST EXACT TENSOR MODIFICATIONS FOR {capability.upper()} CAPABILITY
 
 Your output MUST be a valid JSON array ONLY containing tensor modification objects.
 
 STRICT REQUIREMENTS:
-1. Produce 25-30 DISTINCT modifications (no duplicates).
+1. SUGGEST AS MANY MODIFICATIONS AS NEEDED – target 25–30 DISTINCT edits.
 2. EVERY modification must have confidence ≥ 0.85. Discard anything lower.
 3. Output ONLY a JSON array, no other text or commentary.
-4. Focus on MLP, attention, embedding, and other critical layers across early/mid/late depth.
-5. Keep the modifications coherent and aimed at improving {capability} performance.
-6. No fine-tuning, no architecture changes, no methodology discussion.
+4. Focus on MLP, ATTENTION, EMBEDDING layers across early / mid / late depth.
+5. Keep modifications coherent and aimed at improving {capability} performance.
+6. NO FINE-TUNING, NO ARCHITECTURE CHANGES, NO METHODOLOGY DISCUSSION.
 
 Each object must contain: tensor_name, operation, value, target, confidence, reason.
 Allowed operations: scale, add, normalize, clamp_max, clamp_min.
-Allowed targets: all, top 5%, top 10%, top 20%, bottom 5%, bottom 10%, bottom 20%.
+Allowed targets: all, top 5%, top 10%, top 20%, top 50%, bottom 5%, bottom 10%, bottom 20%, bottom 50%.
 
-Tensor statistics:
-{tensor_stats}
+Available tensors and their statistics:
+{stats_block}
 
 Return ONLY JSON array like: [{{"tensor_name": "...", "operation": "...", "value": ..., "target": "...", "confidence": ..., "reason": "..."}}]"""
 

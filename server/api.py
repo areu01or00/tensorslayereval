@@ -57,7 +57,14 @@ def _filter_suggestions(
     suggestions: List[Dict[str, Any]],
     max_count: int = 20,
     min_confidence: float = 0.85,
+    min_count: int = 20,
 ) -> List[Dict[str, Any]]:
+    """Keep highest-confidence suggestions, ensuring at least min_count are returned.
+
+    We first take all entries >= min_confidence. If fewer than min_count survive,
+    we top up from the remaining suggestions by descending confidence until we
+    reach min_count (capped at max_count).
+    """
     if not suggestions:
         return []
 
@@ -67,11 +74,20 @@ def _filter_suggestions(
         except (TypeError, ValueError):
             return 0.0
 
-    filtered = [s for s in suggestions if conf(s) >= min_confidence]
-    if not filtered:
-        filtered = suggestions
+    # Sort once by confidence desc
+    ordered = sorted(suggestions, key=conf, reverse=True)
 
-    filtered.sort(key=conf, reverse=True)
+    # Take all that meet the threshold
+    filtered = [s for s in ordered if conf(s) >= min_confidence]
+
+    # Top-up from the remainder if we don't have enough
+    if len(filtered) < min_count:
+        remainder = [s for s in ordered if s not in filtered]
+        needed = min(min_count, max_count) - len(filtered)
+        if needed > 0:
+            filtered.extend(remainder[:needed])
+
+    # Enforce max_count cap
     return filtered[:max_count]
 
 
