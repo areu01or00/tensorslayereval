@@ -56,30 +56,7 @@ def _get_tensor_stats(capability: str) -> List[Dict[str, Any]]:
 def _filter_suggestions(
     suggestions: List[Dict[str, Any]],
     max_count: int = 20,
-    min_confidence: float = 0.65,
-) -> List[Dict[str, Any]]:
-    if not suggestions:
-        return []
-
-    def confidence(entry: Dict[str, Any]) -> float:
-        value = entry.get("confidence", 0.0)
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 0.0
-
-    filtered = [entry for entry in suggestions if confidence(entry) >= min_confidence]
-    if not filtered:
-        filtered = suggestions
-
-    filtered.sort(key=confidence, reverse=True)
-    return filtered[:max_count]
-
-
-def _filter_suggestions(
-    suggestions: List[Dict[str, Any]],
-    max_count: int = 20,
-    min_confidence: float = 0.65,
+    min_confidence: float = 0.85,
 ) -> List[Dict[str, Any]]:
     if not suggestions:
         return []
@@ -204,7 +181,7 @@ def apply_hooks(payload: ApplyHooksPayload) -> Dict[str, Any]:
 
     modifications_by_module: Dict[str, List[Dict[str, Any]]] = {}
 
-    for suggestion in payload.suggestions[:10]:  # limit number as in TUI
+    for suggestion in payload.suggestions:
         module_name = _hook_system.tensor_name_to_module_name(suggestion.tensor_name)
         modifications_by_module.setdefault(module_name, []).append(suggestion.model_dump())
 

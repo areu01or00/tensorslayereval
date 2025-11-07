@@ -119,12 +119,16 @@ Be concise and technical."""
 Your output MUST be a valid JSON array ONLY containing tensor modification objects.
 
 STRICT REQUIREMENTS:
-1. Output ONLY a JSON array, no other text
-2. Focus on MLP, attention, and embedding layers
-3. Each object must have: tensor_name, operation, value, target, confidence, reason
+1. Produce 25-30 DISTINCT modifications (no duplicates).
+2. EVERY modification must have confidence ≥ 0.85. Discard anything lower.
+3. Output ONLY a JSON array, no other text or commentary.
+4. Focus on MLP, attention, embedding, and other critical layers across early/mid/late depth.
+5. Keep the modifications coherent and aimed at improving {capability} performance.
+6. No fine-tuning, no architecture changes, no methodology discussion.
 
-Available operations: scale, add, normalize, clamp_max, clamp_min
-Available targets: all, top 5%, top 10%, top 20%, bottom 5%, bottom 10%
+Each object must contain: tensor_name, operation, value, target, confidence, reason.
+Allowed operations: scale, add, normalize, clamp_max, clamp_min.
+Allowed targets: all, top 5%, top 10%, top 20%, bottom 5%, bottom 10%, bottom 20%.
 
 Tensor statistics:
 {tensor_stats}
