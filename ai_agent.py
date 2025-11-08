@@ -174,7 +174,7 @@ Available tensors and their statistics:
 
 WARNING: If you suggest fine-tuning, discuss approaches, or output anything other than a plain JSON array of tensor modifications, your response will be rejected.
 
-Return ONLY a JSON array like: [ {"tensor_name": "...", "operation": "...", ...} ]"""
+Return ONLY a JSON array like: [ {{"tensor_name": "...", "operation": "...", "value": 1.05, "target": "top 10%", "confidence": 0.9, "reason": "..."}} ]"""
 
         try:
             response = self.run(prompt)
