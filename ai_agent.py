@@ -156,21 +156,25 @@ Be concise and technical."""
 Your output MUST be a valid JSON array ONLY containing tensor modification objects.
 
 STRICT REQUIREMENTS:
-1. SUGGEST AS MANY MODIFICATIONS AS NEEDED – target 25–30 DISTINCT edits.
-2. EVERY modification must have confidence ≥ 0.85. Discard anything lower.
-3. Output ONLY a JSON array, no other text or commentary.
-4. Focus on MLP, ATTENTION, EMBEDDING layers across early / mid / late depth.
-5. Keep modifications coherent and aimed at improving {capability} performance.
-6. NO FINE-TUNING, NO ARCHITECTURE CHANGES, NO METHODOLOGY DISCUSSION.
+1. NO FINE-TUNING DISCUSSION OR SUGGESTIONS WHATSOEVER
+2. NO ARCHITECTURE CHANGES
+3. NO DISCUSSIONS OF METHODOLOGY
+4. NO TEXT BEFORE OR AFTER THE JSON ARRAY
 
-Each object must contain: tensor_name, operation, value, target, confidence, reason.
-Allowed operations: scale, add, normalize, clamp_max, clamp_min.
-Allowed targets: all, top 5%, top 10%, top 20%, top 50%, bottom 5%, bottom 10%, bottom 20%, bottom 50%.
+EACH recommendation object MUST HAVE:
+- "tensor_name": EXACT name from the list below
+- "operation": one of [scale, add, clamp_max, clamp_min]
+- "value": specific number (e.g. 1.05, 0.9, 0.01)
+- "target": one of [all, top 10%, top 20%, bottom 10%]
+- "confidence": number between 0-1
+- "reason": ONE SENTENCE explaining the SPECIFIC benefit
 
 Available tensors and their statistics:
 {stats_block}
 
-Return ONLY JSON array like: [{{"tensor_name": "...", "operation": "...", "value": ..., "target": "...", "confidence": ..., "reason": "..."}}]"""
+WARNING: If you suggest fine-tuning, discuss approaches, or output anything other than a plain JSON array of tensor modifications, your response will be rejected.
+
+Return ONLY a JSON array like: [ {"tensor_name": "...", "operation": "...", ...} ]"""
 
         try:
             response = self.run(prompt)

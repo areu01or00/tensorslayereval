@@ -13,6 +13,7 @@ from config_manager import ConfigManager
 from hook_system import HookSystem
 from model_loader import ModelLoader
 from ai_agent import ai_agent
+from weight_patcher import WeightPatcher
 from tensor_inspector import TensorInspector
 
 _config_manager = ConfigManager()
@@ -21,6 +22,7 @@ _hook_system = HookSystem()
 _generation_lock = asyncio.Lock()
 _hooks_active = False
 _tensor_inspector: Optional[TensorInspector] = None
+_weight_patcher: Optional[WeightPatcher] = None
 
 
 @asynccontextmanager
@@ -33,6 +35,8 @@ async def lifespan(_: FastAPI):
     _hook_system.set_model(_model_loader.model)
     global _tensor_inspector
     _tensor_inspector = TensorInspector(_model_loader.model)
+    global _weight_patcher
+    _weight_patcher = WeightPatcher(_model_loader.model)
     yield
     # Cleanup on shutdown (if needed)
 
@@ -112,6 +116,7 @@ class Suggestion(BaseModel):
 
 class ApplyHooksPayload(BaseModel):
     suggestions: List[Suggestion]
+    apply_mode: Optional[str] = "weights"  # "weights" or "hooks"
 
 
 @app.get("/api/health")
@@ -195,20 +200,47 @@ def apply_hooks(payload: ApplyHooksPayload) -> Dict[str, Any]:
     if not payload.suggestions:
         raise HTTPException(status_code=400, detail="No suggestions supplied")
 
-    modifications_by_module: Dict[str, List[Dict[str, Any]]] = {}
+    mode = (payload.apply_mode or "weights").lower()
+    if mode not in ("weights", "hooks"):
+        mode = "weights"
 
-    for suggestion in payload.suggestions:
-        module_name = _hook_system.tensor_name_to_module_name(suggestion.tensor_name)
-        modifications_by_module.setdefault(module_name, []).append(suggestion.model_dump())
-
-    _hook_system.register_layer_hooks(modifications_by_module)
-    hook_count = _hook_system.get_active_modifications_count()
-    _hooks_active = hook_count > 0
-
-    return {
-        "hook_count": hook_count,
-        "modules": list(modifications_by_module.keys()),
-    }
+    if mode == "weights":
+        if _weight_patcher is None:
+            raise HTTPException(status_code=500, detail="Weight patcher not initialized")
+        applied = 0
+        applied_tensors: List[str] = []
+        for s in payload.suggestions:
+            name = s.tensor_name
+            op = s.operation
+            tgt = s.target
+            try:
+                val = float(s.value) if s.value is not None else 0.0
+            except Exception:
+                val = 0.0
+            count = _weight_patcher.apply(name, op, val, tgt)
+            if count > 0:
+                applied += 1
+                applied_tensors.append(name)
+        _hooks_active = applied > 0
+        return {
+            "hook_count": applied,  # semantic: number of suggestions applied
+            "applied_tensors": applied_tensors,
+            "mode": mode,
+        }
+    else:
+        # legacy hooks mode
+        modifications_by_module: Dict[str, List[Dict[str, Any]]] = {}
+        for suggestion in payload.suggestions:
+            module_name = _hook_system.tensor_name_to_module_name(suggestion.tensor_name)
+            modifications_by_module.setdefault(module_name, []).append(suggestion.model_dump())
+        _hook_system.register_layer_hooks(modifications_by_module)
+        hook_count = _hook_system.get_active_modifications_count()
+        _hooks_active = hook_count > 0
+        return {
+            "hook_count": hook_count,
+            "modules": list(modifications_by_module.keys()),
+            "mode": mode,
+        }
 
 
 @app.delete("/api/hooks")
@@ -218,6 +250,17 @@ def clear_hooks() -> Dict[str, Any]:
     _hook_system.clear_hooks()
     _hooks_active = False
     return {"hook_count": 0}
+
+
+@app.post("/api/restore")
+def restore_weights() -> Dict[str, Any]:
+    """Restore all in-memory weight patches to original values."""
+    if _weight_patcher is None:
+        raise HTTPException(status_code=500, detail="Weight patcher not initialized")
+    restored = _weight_patcher.restore_all()
+    # also clear legacy hooks, just in case
+    _hook_system.clear_hooks()
+    return {"restored_params": restored}
 
 
 @app.get("/api/hooks")

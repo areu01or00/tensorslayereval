@@ -89,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         help="Directory to store CSV/JSON outputs",
     )
     parser.add_argument(
+        "--apply-mode",
+        default="weights",
+        choices=["weights", "hooks"],
+        help="Apply patches as in-memory weight edits or legacy activation hooks",
+    )
+    parser.add_argument(
         "--reuse-server",
         action="store_true",
         help="Assume server is already running; skip auto-launch",
@@ -315,7 +321,11 @@ def run_benchmark(args: argparse.Namespace) -> None:
 
         for item in prompts:
             print(f"[bench] Prompt {item.id}: {item.prompt[:60]}...")
-
+            # Ensure clean state per prompt
+            try:
+                api_post(base_url, "/api/restore", {})
+            except Exception:
+                pass
             api_delete(base_url, "/api/hooks")
 
             start = time.perf_counter()
@@ -338,7 +348,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     hook_resp = api_post(
                         base_url,
                         "/api/hooks",
-                        {"suggestions": suggestions},
+                        {"suggestions": suggestions, "apply_mode": args.apply_mode},
                     )
                 else:
                     print(f"[bench] No suggestions returned for capability '{capability}'")
@@ -369,6 +379,11 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     }
                 )
 
+                # Restore weights and clear hooks after each capability run
+                try:
+                    api_post(base_url, "/api/restore", {})
+                except Exception:
+                    pass
                 api_delete(base_url, "/api/hooks")
 
         csv_path = timestamped_path(output_dir, "results", "csv")
