@@ -332,30 +332,16 @@ def run_benchmark(args: argparse.Namespace) -> None:
         # Generate AI suggestions once per capability (cached for all prompts)
         print("[bench] Generating AI suggestions for each capability...")
         cached_suggestions = {}
-        # suggestions will be generated live per capability
         for capability in args.capabilities:
-            if False:
-                # Load fixed patches from file once
-                p = Path(args.patches_file).expanduser().resolve()
-                with p.open("r", encoding="utf-8") as fh:
-                    import json as _json
-                    suggestions = _json.load(fh)
-                cached_suggestions[capability] = suggestions
-                # fixed patches disabled
-                print(f"[bench] → Using {len(suggestions)} patches from file for '{capability}'")
-            else:
-                print(f"[bench] → Generating AI suggestions for '{capability}'...")
-                suggestions_resp = api_post(
-                    base_url,
-                    "/api/suggestions",
-                    {"capability": capability},
-                )
-                suggestions = suggestions_resp.get("suggestions", [])
-                cached_suggestions[capability] = suggestions
-                # hashing disabled
-                print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
-
-                # Saving suggestions disabled in this mode
+            print(f"[bench] → Generating AI suggestions for '{capability}'...")
+            suggestions_resp = api_post(
+                base_url,
+                "/api/suggestions",
+                {"capability": capability},
+            )
+            suggestions = suggestions_resp.get("suggestions", [])
+            cached_suggestions[capability] = suggestions
+            print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
 
         print(f"[bench] Starting benchmark with {len(prompts)} prompts...")
         results: List[Dict[str, Optional[str]]] = []
