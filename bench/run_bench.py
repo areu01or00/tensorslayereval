@@ -101,6 +101,23 @@ def parse_args() -> argparse.Namespace:
         help="Evaluation metric: generation accuracy or teacher-forced loss on answer tokens",
     )
     parser.add_argument(
+        "--auto-benchmark",
+        action="store_true",
+        help="Two-phase flow: loss screen on a calibration slice, then accuracy benchmark if accepted",
+    )
+    parser.add_argument(
+        "--screen-size",
+        type=int,
+        default=150,
+        help="Number of prompts for the loss screening phase when --auto-benchmark is set",
+    )
+    parser.add_argument(
+        "--screen-threshold",
+        type=float,
+        default=-0.01,
+        help="Accept patches if mean loss delta < threshold (negative = improvement) in screening",
+    )
+    parser.add_argument(
         "--calibrate-loss",
         action="store_true",
         help="In loss mode: decide whether to keep applying patches based on mean delta over first K prompts",
@@ -342,6 +359,185 @@ def run_benchmark(args: argparse.Namespace) -> None:
             suggestions = suggestions_resp.get("suggestions", [])
             cached_suggestions[capability] = suggestions
             print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
+
+        # Auto-benchmark two-phase flow: loss screen → accuracy benchmark
+        if args.auto_benchmark:
+            loss_rows: List[Dict[str, Optional[str]]] = []
+            acc_rows: List[Dict[str, Optional[str]]] = []
+
+            screen_n = min(args.screen_size, len(prompts))
+            screen_prompts = prompts[:screen_n]
+            print(f"[bench] Screening (loss) on first {screen_n} prompts...")
+
+            accept_by_cap: Dict[str, bool] = {}
+            for capability in args.capabilities:
+                suggestions = cached_suggestions.get(capability, [])
+                if not suggestions:
+                    print(f"[bench] No suggestions for '{capability}', rejecting")
+                    accept_by_cap[capability] = False
+                    continue
+
+                deltas: List[float] = []
+                for item in screen_prompts:
+                    try:
+                        api_post(base_url, "/api/restore", {})
+                    except Exception:
+                        pass
+                    api_delete(base_url, "/api/hooks")
+
+                    loss_base_resp = api_post(
+                        base_url,
+                        "/api/loss",
+                        {
+                            "prompt": item.prompt,
+                            "answer": item.answer or "",
+                            "answer_prefix": " #### ",
+                            "use_chat_template": False,
+                        },
+                    )
+                    baseline_loss = float(loss_base_resp.get("loss"))
+
+                    hook_resp = api_post(
+                        base_url,
+                        "/api/hooks",
+                        {"suggestions": suggestions, "apply_mode": args.apply_mode},
+                    )
+
+                    loss_patch_resp = api_post(
+                        base_url,
+                        "/api/loss",
+                        {
+                            "prompt": item.prompt,
+                            "answer": item.answer or "",
+                            "answer_prefix": " #### ",
+                            "use_chat_template": False,
+                        },
+                    )
+                    patched_loss = float(loss_patch_resp.get("loss"))
+                    delta = patched_loss - baseline_loss
+                    deltas.append(delta)
+
+                    loss_rows.append(
+                        {
+                            "prompt_id": item.id,
+                            "capability": capability,
+                            "prompt": item.prompt,
+                            "answer": item.answer,
+                            "baseline_loss": f"{baseline_loss:.6f}",
+                            "patched_loss": f"{patched_loss:.6f}",
+                            "loss_delta": f"{delta:.6f}",
+                            "hook_count": str(hook_resp.get("hook_count", 0)),
+                            "suggestion_count": str(len(suggestions)),
+                        }
+                    )
+
+                    try:
+                        api_post(base_url, "/api/restore", {})
+                    except Exception:
+                        pass
+                    api_delete(base_url, "/api/hooks")
+
+                mean_delta = (sum(deltas) / len(deltas)) if deltas else 0.0
+                decision = mean_delta < args.screen_threshold
+                accept_by_cap[capability] = decision
+                verdict = "ACCEPT" if decision else "REJECT"
+                print(f"[bench] Capability '{capability}': screen mean_delta={mean_delta:.6f} → {verdict}")
+
+            # Write loss screen results
+            if loss_rows:
+                csv_path = timestamped_path(output_dir, "results-loss", "csv")
+                json_path = timestamped_path(output_dir, "results-loss", "json")
+                fieldnames = list(loss_rows[0].keys())
+                with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(loss_rows)
+                with json_path.open("w", encoding="utf-8") as jsonfile:
+                    json.dump(loss_rows, jsonfile, indent=2)
+                print(f"[bench] Loss screen results → {csv_path.name}")
+
+            accepted_caps = [c for c, ok in accept_by_cap.items() if ok]
+            if not accepted_caps:
+                print("[bench] No capabilities accepted by screen; skipping accuracy benchmark")
+                return
+
+            print(f"[bench] Starting accuracy benchmark for accepted capabilities: {accepted_caps}")
+            for item in prompts:
+                try:
+                    api_post(base_url, "/api/restore", {})
+                except Exception:
+                    pass
+                api_delete(base_url, "/api/hooks")
+
+                start = time.perf_counter()
+                baseline = api_post(
+                    base_url,
+                    "/api/generate",
+                    {"query": item.prompt, "config": args.config, "use_hooks": False},
+                )
+                baseline_latency = time.perf_counter() - start
+                baseline_output = baseline.get("original")
+
+                for capability in accepted_caps:
+                    suggestions = cached_suggestions.get(capability, [])
+                    hook_resp = api_post(
+                        base_url,
+                        "/api/hooks",
+                        {"suggestions": suggestions, "apply_mode": args.apply_mode},
+                    )
+
+                    start = time.perf_counter()
+                    patched = api_post(
+                        base_url,
+                        "/api/generate",
+                        {"query": item.prompt, "config": args.config, "use_hooks": True},
+                    )
+                    patched_latency = time.perf_counter() - start
+                    match = evaluate(item.answer, patched.get("modified") or patched.get("original"))
+
+                    acc_rows.append(
+                        {
+                            "prompt_id": item.id,
+                            "capability": capability,
+                            "prompt": item.prompt,
+                            "answer": item.answer,
+                            "baseline_output": baseline_output,
+                            "patched_output": patched.get("modified"),
+                            "baseline_latency_sec": f"{baseline_latency:.3f}",
+                            "patched_latency_sec": f"{patched_latency:.3f}",
+                            "hook_count": str(hook_resp.get("hook_count", 0)),
+                            "suggestion_count": str(len(suggestions)),
+                            "match": "" if match is None else str(match),
+                        }
+                    )
+
+                    try:
+                        api_post(base_url, "/api/restore", {})
+                    except Exception:
+                        pass
+                    api_delete(base_url, "/api/hooks")
+
+            if acc_rows:
+                csv_path = timestamped_path(output_dir, "results-acc", "csv")
+                json_path = timestamped_path(output_dir, "results-acc", "json")
+                fieldnames = list(acc_rows[0].keys())
+                with csv_path.open("w", newline="", encoding="utf-8") as csvfile:
+                    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(acc_rows)
+                with json_path.open("w", encoding="utf-8") as jsonfile:
+                    json.dump(acc_rows, jsonfile, indent=2)
+                print(f"[bench] Accuracy results → {csv_path.name}")
+
+            if loss_rows:
+                print("\n=== Loss Screen Summary ===")
+                for line in summarize_results(loss_rows):
+                    print(line)
+            if acc_rows:
+                print("\n=== Accuracy Summary ===")
+                for line in summarize_results(acc_rows):
+                    print(line)
+            return
 
         print(f"[bench] Starting benchmark with {len(prompts)} prompts...")
         results: List[Dict[str, Optional[str]]] = []
