@@ -95,6 +95,29 @@ def parse_args() -> argparse.Namespace:
         help="Apply patches as in-memory weight edits or legacy activation hooks",
     )
     parser.add_argument(
+        "--metric",
+        default="accuracy",
+        choices=["accuracy", "loss"],
+        help="Evaluation metric: generation accuracy or teacher-forced loss on answer tokens",
+    )
+    parser.add_argument(
+        "--calibrate-loss",
+        action="store_true",
+        help="In loss mode: decide whether to keep applying patches based on mean delta over first K prompts",
+    )
+    parser.add_argument(
+        "--calibrate-loss-size",
+        type=int,
+        default=25,
+        help="Number of prompts for loss calibration window (loss mode only)",
+    )
+    parser.add_argument(
+        "--calibrate-loss-threshold",
+        type=float,
+        default=-0.005,
+        help="Mean loss delta threshold to accept patches (negative = improvement)",
+    )
+    parser.add_argument(
         "--reuse-server",
         action="store_true",
         help="Assume server is already running; skip auto-launch",
@@ -104,6 +127,7 @@ def parse_args() -> argparse.Namespace:
         default="error",
         help="Log level forwarded to uvicorn when auto-launching",
     )
+    # Suggestions are generated live; no fixed patch file or suggestion saving flags
     return parser.parse_args()
 
 
@@ -277,6 +301,9 @@ def timestamped_path(directory: Path, stem: str, suffix: str) -> Path:
     return directory / f"{stem}-{ts}.{suffix}"
 
 
+# No suggestion hashing in the base harness
+
+
 def run_benchmark(args: argparse.Namespace) -> None:
     if args.benchmark_file:
         prompts = load_prompts_from_file(Path(args.benchmark_file), args.max_prompts)
@@ -305,19 +332,38 @@ def run_benchmark(args: argparse.Namespace) -> None:
         # Generate AI suggestions once per capability (cached for all prompts)
         print("[bench] Generating AI suggestions for each capability...")
         cached_suggestions = {}
+        # suggestions will be generated live per capability
         for capability in args.capabilities:
-            print(f"[bench] → Generating suggestions for '{capability}'...")
-            suggestions_resp = api_post(
-                base_url,
-                "/api/suggestions",
-                {"capability": capability},
-            )
-            suggestions = suggestions_resp.get("suggestions", [])
-            cached_suggestions[capability] = suggestions
-            print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
+            if False:
+                # Load fixed patches from file once
+                p = Path(args.patches_file).expanduser().resolve()
+                with p.open("r", encoding="utf-8") as fh:
+                    import json as _json
+                    suggestions = _json.load(fh)
+                cached_suggestions[capability] = suggestions
+                # fixed patches disabled
+                print(f"[bench] → Using {len(suggestions)} patches from file for '{capability}'")
+            else:
+                print(f"[bench] → Generating AI suggestions for '{capability}'...")
+                suggestions_resp = api_post(
+                    base_url,
+                    "/api/suggestions",
+                    {"capability": capability},
+                )
+                suggestions = suggestions_resp.get("suggestions", [])
+                cached_suggestions[capability] = suggestions
+                # hashing disabled
+                print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
+
+                # Saving suggestions disabled in this mode
 
         print(f"[bench] Starting benchmark with {len(prompts)} prompts...")
         results: List[Dict[str, Optional[str]]] = []
+
+        # Calibration state (loss mode only)
+        calibrated = not (args.metric == "loss" and args.calibrate_loss)
+        allow_patches = True
+        calib_deltas: List[float] = []
 
         for item in prompts:
             print(f"[bench] Prompt {item.id}: {item.prompt[:60]}...")
@@ -328,14 +374,31 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 pass
             api_delete(base_url, "/api/hooks")
 
-            start = time.perf_counter()
-            baseline = api_post(
-                base_url,
-                "/api/generate",
-                {"query": item.prompt, "config": args.config, "use_hooks": False},
-            )
-            baseline_latency = time.perf_counter() - start
-            baseline_output = baseline.get("original")
+            baseline_output = None
+            baseline_latency = 0.0
+            baseline_loss: Optional[float] = None
+            if args.metric == "accuracy":
+                start = time.perf_counter()
+                baseline = api_post(
+                    base_url,
+                    "/api/generate",
+                    {"query": item.prompt, "config": args.config, "use_hooks": False},
+                )
+                baseline_latency = time.perf_counter() - start
+                baseline_output = baseline.get("original")
+            else:
+                # loss metric: compute baseline loss once per prompt
+                loss_resp = api_post(
+                    base_url,
+                    "/api/loss",
+                    {
+                        "prompt": item.prompt,
+                        "answer": item.answer or "",
+                        "answer_prefix": " #### ",
+                        "use_chat_template": False,
+                    },
+                )
+                baseline_loss = float(loss_resp.get("loss"))
 
             for capability in args.capabilities:
                 api_delete(base_url, "/api/hooks")
@@ -344,40 +407,88 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 suggestions = cached_suggestions.get(capability, [])
 
                 hook_resp = {"hook_count": 0}
-                if suggestions:
+                # If calibration disallowed patches already, skip applying patches
+                hook_resp = {"hook_count": 0}
+                if suggestions and allow_patches:
                     hook_resp = api_post(
                         base_url,
                         "/api/hooks",
                         {"suggestions": suggestions, "apply_mode": args.apply_mode},
                     )
                 else:
-                    print(f"[bench] No suggestions returned for capability '{capability}'")
+                    if suggestions and not allow_patches:
+                        print("[bench] Patches disabled by calibration; skipping application")
+                    else:
+                        print(f"[bench] No suggestions returned for capability '{capability}'")
 
-                start = time.perf_counter()
-                patched = api_post(
-                    base_url,
-                    "/api/generate",
-                    {"query": item.prompt, "config": args.config, "use_hooks": True},
-                )
-                patched_latency = time.perf_counter() - start
+                if args.metric == "accuracy":
+                    start = time.perf_counter()
+                    patched = api_post(
+                        base_url,
+                        "/api/generate",
+                        {"query": item.prompt, "config": args.config, "use_hooks": True},
+                    )
+                    patched_latency = time.perf_counter() - start
+                    match = evaluate(item.answer, patched.get("modified") or patched.get("original"))
 
-                match = evaluate(item.answer, patched.get("modified") or patched.get("original"))
+                    results.append(
+                        {
+                            "prompt_id": item.id,
+                            "capability": capability,
+                            "prompt": item.prompt,
+                            "answer": item.answer,
+                            "baseline_output": baseline_output,
+                            "patched_output": patched.get("modified"),
+                            "baseline_latency_sec": f"{baseline_latency:.3f}",
+                            "patched_latency_sec": f"{patched_latency:.3f}",
+                            "hook_count": str(hook_resp.get("hook_count", 0)),
+                            "suggestion_count": str(len(suggestions)),
+                            "match": "" if match is None else str(match),
+                        }
+                    )
+                else:
+                    # loss metric path: compute patched loss
+                    patched_loss_resp = api_post(
+                        base_url,
+                        "/api/loss",
+                        {
+                            "prompt": item.prompt,
+                            "answer": item.answer or "",
+                            "answer_prefix": " #### ",
+                            "use_chat_template": False,
+                        },
+                    )
+                    patched_loss = float(patched_loss_resp.get("loss"))
+                    delta = patched_loss - (baseline_loss or 0.0)
 
-                results.append(
-                    {
-                        "prompt_id": item.id,
-                        "capability": capability,
-                        "prompt": item.prompt,
-                        "answer": item.answer,
-                        "baseline_output": baseline_output,
-                        "patched_output": patched.get("modified"),
-                        "baseline_latency_sec": f"{baseline_latency:.3f}",
-                        "patched_latency_sec": f"{patched_latency:.3f}",
-                        "hook_count": str(hook_resp.get("hook_count", 0)),
-                        "suggestion_count": str(len(suggestions)),
-                        "match": "" if match is None else str(match),
-                    }
-                )
+                    # Update calibration window and decide once
+                    if args.calibrate_loss and not calibrated:
+                        calib_deltas.append(delta)
+                        if len(calib_deltas) >= args.calibrate_loss_size:
+                            mean_delta = sum(calib_deltas) / len(calib_deltas)
+                            allow_patches = mean_delta < args.calibrate_loss_threshold
+                            calibrated = True
+                            decision = "ACCEPT" if allow_patches else "REJECT"
+                            print(
+                                f"[bench] Calibration complete over {len(calib_deltas)} prompts: mean_delta={mean_delta:.6f} → {decision} patches"
+                            )
+
+                    results.append(
+                        {
+                            "prompt_id": item.id,
+                            "capability": capability,
+                            "prompt": item.prompt,
+                            "answer": item.answer,
+                            "baseline_loss": f"{baseline_loss:.6f}" if baseline_loss is not None else "",
+                            "patched_loss": f"{patched_loss:.6f}",
+                            "loss_delta": f"{delta:.6f}",
+                            "hook_count": str(hook_resp.get("hook_count", 0)),
+                            "suggestion_count": str(len(suggestions)),
+                            # suggestions hash removed
+                            "calibrated": str(calibrated),
+                            "allow_patches": str(allow_patches),
+                        }
+                    )
 
                 # Restore weights and clear hooks after each capability run
                 try:
@@ -425,15 +536,29 @@ def summarize_results(rows: List[Dict[str, Optional[str]]]) -> List[str]:
         by_capability.setdefault(str(row["capability"]), []).append(row)
 
     for capability, entries in by_capability.items():
-        matches = [e["match"] == "True" for e in entries if e["match"]]
-        accuracy = (sum(matches) / len(matches) * 100) if matches else 0.0
-        avg_baseline = sum(float(e["baseline_latency_sec"]) for e in entries) / len(entries)
-        avg_patched = sum(float(e["patched_latency_sec"]) for e in entries) / len(entries)
-        avg_hooks = sum(int(e["hook_count"]) for e in entries) / len(entries)
-        lines.append(
-            f"Capability {capability}: accuracy={accuracy:.1f}% (n={len(matches)}), "
-            f"latency baseline={avg_baseline:.3f}s, patched={avg_patched:.3f}s, avg hooks={avg_hooks:.2f}"
-        )
+        if "baseline_loss" in entries[0]:
+            # loss metric summary
+            losses_base = [float(e["baseline_loss"]) for e in entries if e.get("baseline_loss")]
+            losses_patch = [float(e["patched_loss"]) for e in entries if e.get("patched_loss")]
+            deltas = [float(e["loss_delta"]) for e in entries if e.get("loss_delta")]
+            n = min(len(losses_base), len(losses_patch))
+            avg_base = sum(losses_base) / len(losses_base) if losses_base else 0.0
+            avg_patch = sum(losses_patch) / len(losses_patch) if losses_patch else 0.0
+            avg_delta = sum(deltas) / len(deltas) if deltas else 0.0
+            avg_hooks = sum(int(e["hook_count"]) for e in entries) / len(entries)
+            lines.append(
+                f"Capability {capability}: avg_loss base={avg_base:.6f}, patched={avg_patch:.6f}, delta={avg_delta:.6f} (n={n}), avg hooks={avg_hooks:.2f}"
+            )
+        else:
+            matches = [e["match"] == "True" for e in entries if e.get("match")]
+            accuracy = (sum(matches) / len(matches) * 100) if matches else 0.0
+            avg_baseline = sum(float(e["baseline_latency_sec"]) for e in entries) / len(entries)
+            avg_patched = sum(float(e["patched_latency_sec"]) for e in entries) / len(entries)
+            avg_hooks = sum(int(e["hook_count"]) for e in entries) / len(entries)
+            lines.append(
+                f"Capability {capability}: accuracy={accuracy:.1f}% (n={len(matches)}), "
+                f"latency baseline={avg_baseline:.3f}s, patched={avg_patched:.3f}s, avg hooks={avg_hooks:.2f}"
+            )
 
     return lines
 

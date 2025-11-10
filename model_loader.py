@@ -145,6 +145,72 @@ class ModelLoader:
             
         except Exception as e:
             return f"Generation error: {str(e)}"
+
+    def compute_answer_loss(
+        self,
+        prompt: str,
+        answer: str,
+        answer_prefix: str = " #### ",
+        use_chat_template: bool = False,
+    ) -> Dict[str, Any]:
+        """Compute teacher-forced average negative log-likelihood on the answer tokens only.
+
+        We build a single sequence: (prompt + answer_prefix + answer), and mask labels so that
+        only the answer tokens contribute to the loss. No gradients are computed.
+
+        Returns a dict with: loss (float), prompt_tokens (int), answer_tokens (int), total_tokens (int).
+        """
+        if not self.model or not self.tokenizer:
+            return {"loss": None, "prompt_tokens": 0, "answer_tokens": 0, "total_tokens": 0}
+
+        # Build plain text unless explicitly requested to use chat template
+        if use_chat_template and self.is_qwen_model and hasattr(self.tokenizer, "apply_chat_template"):
+            # Use a single user turn containing full text to keep boundary simple
+            messages = [{"role": "user", "content": f"{prompt}{answer_prefix}{answer}"}]
+            full_text = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+            # Tokenize segments without special tokens to compute boundary lengths
+            ids_prompt = self.tokenizer(
+                f"{prompt}{answer_prefix}", add_special_tokens=False
+            )["input_ids"]
+            ids_answer = self.tokenizer(answer, add_special_tokens=False)["input_ids"]
+            enc = self.tokenizer(full_text, return_tensors="pt", add_special_tokens=False)
+        else:
+            # Plain concatenation path (default)
+            ids_prompt = self.tokenizer(
+                f"{prompt}{answer_prefix}", add_special_tokens=False
+            )["input_ids"]
+            ids_answer = self.tokenizer(answer, add_special_tokens=False)["input_ids"]
+            enc = {
+                "input_ids": ids_prompt + ids_answer,
+            }
+
+        # Optionally prepend BOS token for models that expect it
+        bos_id = self.tokenizer.bos_token_id
+        input_ids = enc["input_ids"] if isinstance(enc, dict) else enc["input_ids"][0].tolist()
+        if bos_id is not None:
+            input_ids = [bos_id] + input_ids
+
+        # Prepare labels: ignore prompt part (and BOS), include answer tokens
+        ignore_count = len(ids_prompt) + (1 if bos_id is not None else 0)
+        labels = [-100] * ignore_count + ids_answer
+
+        import torch
+
+        input_ids_tensor = torch.tensor([input_ids], dtype=torch.long, device=self.device)
+        labels_tensor = torch.tensor([labels], dtype=torch.long, device=self.device)
+
+        self.model.eval()
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids_tensor, labels=labels_tensor)
+            loss_val = float(outputs.loss.item()) if hasattr(outputs, "loss") and outputs.loss is not None else None
+
+        total_tokens = len(input_ids)
+        return {
+            "loss": loss_val,
+            "prompt_tokens": len(ids_prompt),
+            "answer_tokens": len(ids_answer),
+            "total_tokens": total_tokens,
+        }
     
     def _process_qwen_response(self, response: str) -> str:
         """Process Qwen model response to handle thinking tokens"""

@@ -51,7 +51,8 @@ def _require_model_loaded() -> None:
 
 def _get_tensor_stats(capability: str) -> List[Dict[str, Any]]:
     if _tensor_inspector is not None:
-        stats = _tensor_inspector.sample_stats(capability=capability)
+        # Match boilerplate_v2 by including attention, MLP, and norm weights
+        stats = _tensor_inspector.sample_stats(capability=capability, only_linear_2d=False)
         if stats:
             return stats
     return []
@@ -117,6 +118,13 @@ class Suggestion(BaseModel):
 class ApplyHooksPayload(BaseModel):
     suggestions: List[Suggestion]
     apply_mode: Optional[str] = "weights"  # "weights" or "hooks"
+
+
+class LossPayload(BaseModel):
+    prompt: str
+    answer: str
+    answer_prefix: str = Field(" #### ", description="Delimiter between prompt and answer")
+    use_chat_template: bool = Field(False, description="Use chat template for tokenization if available")
 
 
 @app.get("/api/health")
@@ -188,7 +196,67 @@ async def get_suggestions(payload: SuggestionPayload) -> Dict[str, Any]:
         tensor_stats,
         payload.capability,
     )
-    filtered = _filter_suggestions(suggestions)
+    # Validate and normalize suggestions to enforce allowed operations/targets and 2D weight params only
+    normalized: List[Dict[str, Any]] = []
+    for s in suggestions:
+        try:
+            tname = str(s.get("tensor_name"))
+            op = str(s.get("operation")).lower()
+            tgt = str(s.get("target")).lower()
+            val = s.get("value")
+            conf = s.get("confidence", 0.0)
+        except Exception:
+            continue
+
+        # allowed ops
+        if op not in {"scale", "add", "clamp_max", "clamp_min"}:
+            continue
+
+        # normalize target to allowed set
+        def _norm_target(t: str) -> Optional[str]:
+            t = t.replace("_", " ").strip()
+            if t in ("all", "top 10%", "top 20%", "bottom 10%"):
+                return t
+            import re
+            m = re.match(r"(top|bottom)\s+(\d+)%", t)
+            if not m:
+                return None
+            side, pct = m.group(1), int(m.group(2))
+            if side == "top":
+                return "top 10%" if pct <= 15 else "top 20%"
+            else:
+                return "bottom 10%"
+
+        tgt_n = _norm_target(tgt)
+        if tgt_n is None:
+            continue
+
+        # Ensure param exists and is allowed 2D linear
+        if _weight_patcher is None:
+            continue
+        param = _weight_patcher._get_param(tname)  # type: ignore[attr-defined]
+        if param is None or not _weight_patcher._is_allowed(tname, param):  # type: ignore[attr-defined]
+            continue
+
+        # value normalization
+        try:
+            v = float(val)
+        except Exception:
+            # require numeric value for all ops we support
+            continue
+
+        normalized.append(
+            {
+                "tensor_name": tname,
+                "operation": op,
+                "value": v,
+                "target": tgt_n,
+                "confidence": conf,
+                "reason": s.get("reason"),
+            }
+        )
+
+    filtered = _filter_suggestions(normalized)
     return {"suggestions": filtered}
 
 
@@ -270,6 +338,21 @@ def hooks_status() -> Dict[str, Any]:
         "active": _hooks_active,
         "stats": _hook_system.get_hook_stats(),
     }
+
+
+@app.post("/api/loss")
+def compute_loss(payload: LossPayload) -> Dict[str, Any]:
+    """Compute teacher-forced loss on the answer tokens only (no gradient)."""
+    _require_model_loaded()
+    result = _model_loader.compute_answer_loss(
+        prompt=payload.prompt,
+        answer=payload.answer,
+        answer_prefix=payload.answer_prefix,
+        use_chat_template=payload.use_chat_template,
+    )
+    if result.get("loss") is None:
+        raise HTTPException(status_code=500, detail="Loss computation failed")
+    return result
 
 
 @app.get("/api/history")

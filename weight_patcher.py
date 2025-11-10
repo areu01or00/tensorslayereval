@@ -23,6 +23,14 @@ ALLOWED_LINEAR_KEYS = (
     "mlp.down_proj.weight",
 )
 
+ALLOWED_1D_KEYS = (
+    "input_layernorm.weight",
+    "post_attention_layernorm.weight",
+    ".layernorm.weight",
+    ".ln.weight",
+    "norm.weight",
+)
+
 
 class WeightPatcher:
     def __init__(self, model: torch.nn.Module):
@@ -39,9 +47,13 @@ class WeightPatcher:
     def _is_allowed(self, name: str, param: torch.nn.Parameter) -> bool:
         if not name.endswith(".weight"):
             return False
-        if param.ndim != 2:
-            return False
-        return any(k in name for k in ALLOWED_LINEAR_KEYS)
+        # Allow 2D linear weights for attn/MLP projections
+        if param.ndim == 2 and any(k in name for k in ALLOWED_LINEAR_KEYS):
+            return True
+        # Allow 1D layernorm/final norm weights
+        if param.ndim == 1 and any(k in name for k in ALLOWED_1D_KEYS):
+            return True
+        return False
 
     def _mask_from_target(self, tensor: torch.Tensor, target: str) -> torch.Tensor:
         target = target.strip().lower().replace("_", " ")
@@ -108,4 +120,3 @@ class WeightPatcher:
                     restored += 1
         self._originals.clear()
         return restored
-

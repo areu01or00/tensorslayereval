@@ -10,6 +10,7 @@ from typing import Dict, Iterable, List, Optional
 
 import torch
 from safetensors import safe_open
+from weight_patcher import ALLOWED_LINEAR_KEYS
 
 
 @dataclass
@@ -65,8 +66,16 @@ class TensorInspector:
         self._tensor_names = ordered_names
         self._stats_cache: Dict[str, TensorStats] = {}
 
-    def sample_stats(self, capability: str = "general", sample_count: Optional[int] = None) -> List[Dict[str, object]]:
+    def sample_stats(
+        self,
+        capability: str = "general",
+        sample_count: Optional[int] = None,
+        only_linear_2d: bool = False,
+    ) -> List[Dict[str, object]]:
         names = self._prioritized_names(capability)
+        if only_linear_2d:
+            # Keep .weight tensors that match allowed linear substrings
+            names = [n for n in names if n.endswith(".weight") and any(k in n for k in ALLOWED_LINEAR_KEYS)]
         if sample_count is not None:
             names = names[:sample_count]
         stats: List[Dict[str, object]] = []
@@ -76,6 +85,9 @@ class TensorInspector:
             if stat is None:
                 tensor = self._load_tensor(name)
                 if tensor is None:
+                    continue
+                # Enforce 2D if requested
+                if only_linear_2d and tensor.ndim != 2:
                     continue
                 stat = self._analyze_tensor(name, tensor)
                 self._stats_cache[name] = stat
