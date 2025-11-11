@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
+import threading
 
 try:
     from huggingface_hub import snapshot_download
@@ -106,6 +107,17 @@ def parse_args() -> argparse.Namespace:
         help="Two-phase flow: loss screen on a calibration slice, then accuracy benchmark if accepted",
     )
     parser.add_argument(
+        "--log-accuracy",
+        action="store_true",
+        help="Print per-prompt baseline and patched rollouts during accuracy phase",
+    )
+    parser.add_argument(
+        "--log-accuracy-max-chars",
+        type=int,
+        default=200,
+        help="Max characters to print per rollout line when --log-accuracy is set",
+    )
+    parser.add_argument(
         "--screen-size",
         type=int,
         default=150,
@@ -143,6 +155,17 @@ def parse_args() -> argparse.Namespace:
         "--uvicorn-log-level",
         default="error",
         help="Log level forwarded to uvicorn when auto-launching",
+    )
+    parser.add_argument(
+        "--keep-server",
+        action="store_true",
+        help="Do not stop the auto-launched uvicorn server on exit",
+    )
+    parser.add_argument(
+        "--heartbeat-sec",
+        type=int,
+        default=0,
+        help="Print a heartbeat line every N seconds to keep the session active (0=off)",
     )
     # Suggestions are generated live; no fixed patch file or suggestion saving flags
     return parser.parse_args()
@@ -268,7 +291,8 @@ def launch_server(host: str, port: int, model_path: Path, log_level: str) -> sub
         log_level,
     ]
     print(f"[bench] Launching uvicorn with MODEL_PATH={model_path}")
-    proc = subprocess.Popen(cmd, env=env)
+    # Detach server into its own session so it survives parent SIGHUP/terminal loss
+    proc = subprocess.Popen(cmd, env=env, preexec_fn=os.setsid)
     return proc
 
 
@@ -307,9 +331,36 @@ def normalize_answer(text: Optional[str]) -> Optional[str]:
     return " ".join(text.strip().lower().split())
 
 
+def _extract_numbers(text: Optional[str]) -> List[float]:
+    if not text:
+        return []
+    import re
+    s = text.replace(",", "")
+    nums = re.findall(r"-?\d+(?:\.\d+)?", s)
+    out: List[float] = []
+    for n in nums:
+        try:
+            out.append(float(n))
+        except Exception:
+            pass
+    return out
+
+
 def evaluate(answer: Optional[str], output: Optional[str]) -> Optional[bool]:
     if answer is None or output is None:
         return None
+    # Try numeric evaluation first (robust to CoT):
+    # Use the last numeric token from the gold answer (GSM8K style),
+    # and accept a match if ANY numeric token in the output equals it within tolerance.
+    a_nums = _extract_numbers(answer)
+    o_nums = _extract_numbers(output)
+    if a_nums and o_nums:
+        a_num = a_nums[-1]
+        for x in o_nums:
+            if abs(a_num - x) <= 1e-6:
+                return True
+        return False
+    # Fallback to normalized string equality
     return normalize_answer(answer) == normalize_answer(output)
 
 
@@ -322,6 +373,30 @@ def timestamped_path(directory: Path, stem: str, suffix: str) -> Path:
 
 
 def run_benchmark(args: argparse.Namespace) -> None:
+    # Ignore SIGHUP so the benchmark keeps running if the SSH session drops
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    except Exception:
+        pass
+
+    # Optional heartbeat to keep output alive for long runs
+    stop_hb: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
+    if getattr(args, "heartbeat_sec", 0):
+        interval = max(1, int(args.heartbeat_sec))
+        stop_hb = threading.Event()
+
+        def _heartbeat():
+            while not stop_hb.is_set():
+                print(f"[bench] …heartbeat (every {interval}s)", flush=True)
+                # sleep in small chunks to exit quickly on stop
+                for _ in range(interval):
+                    if stop_hb.is_set():
+                        break
+                    time.sleep(1)
+
+        hb_thread = threading.Thread(target=_heartbeat, daemon=True)
+        hb_thread.start()
     if args.benchmark_file:
         prompts = load_prompts_from_file(Path(args.benchmark_file), args.max_prompts)
     else:
@@ -417,6 +492,12 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     delta = patched_loss - baseline_loss
                     deltas.append(delta)
 
+                    if getattr(args, "log_accuracy", False):
+                        print(
+                            f"[bench] (screen) {item.id} {capability}: base={baseline_loss:.6f} patched={patched_loss:.6f} delta={delta:.6f}",
+                            flush=True,
+                        )
+
                     loss_rows.append(
                         {
                             "prompt_id": item.id,
@@ -477,6 +558,16 @@ def run_benchmark(args: argparse.Namespace) -> None:
                 )
                 baseline_latency = time.perf_counter() - start
                 baseline_output = baseline.get("original")
+                if args.log_accuracy:
+                    def _trunc_txt(s: Optional[str], limit: int) -> str:
+                        if not s:
+                            return ""
+                        return s if len(s) <= limit else s[:limit] + "…"
+                    print(
+                        f"[bench] (acc) {item.id} baseline {baseline_latency:.2f}s: "
+                        f"{_trunc_txt(baseline_output, args.log_accuracy_max_chars)}",
+                        flush=True,
+                    )
 
                 for capability in accepted_caps:
                     suggestions = cached_suggestions.get(capability, [])
@@ -494,6 +585,14 @@ def run_benchmark(args: argparse.Namespace) -> None:
                     )
                     patched_latency = time.perf_counter() - start
                     match = evaluate(item.answer, patched.get("modified") or patched.get("original"))
+                    baseline_match = evaluate(item.answer, baseline_output)
+                    if args.log_accuracy:
+                        patched_text = patched.get("modified") or patched.get("original") or ""
+                        print(
+                            f"[bench] (acc) {item.id} {capability} patched {patched_latency:.2f}s match={match}: "
+                            f"{_trunc_txt(patched_text, args.log_accuracy_max_chars)}",
+                            flush=True,
+                        )
 
                     acc_rows.append(
                         {
@@ -507,6 +606,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                             "patched_latency_sec": f"{patched_latency:.3f}",
                             "hook_count": str(hook_resp.get("hook_count", 0)),
                             "suggestion_count": str(len(suggestions)),
+                            "baseline_match": "" if baseline_match is None else str(baseline_match),
                             "match": "" if match is None else str(match),
                         }
                     )
@@ -699,7 +799,16 @@ def run_benchmark(args: argparse.Namespace) -> None:
         summary_path.write_text("\n".join(summary), encoding="utf-8")
 
     finally:
-        if server_proc:
+        # Stop heartbeat if active
+        try:
+            if stop_hb is not None:
+                stop_hb.set()
+            if hb_thread is not None:
+                hb_thread.join(timeout=2)
+        except Exception:
+            pass
+
+        if server_proc and not getattr(args, "keep_server", False):
             print("[bench] Stopping uvicorn")
             server_proc.send_signal(signal.SIGINT)
             try:

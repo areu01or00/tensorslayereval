@@ -214,12 +214,17 @@ class ModelLoader:
     
     def _process_qwen_response(self, response: str) -> str:
         """Process Qwen model response to handle thinking tokens"""
-        # Remove thinking tokens if present
+        import re
+        # Remove Qwen thinking blocks
         if "<thinking>" in response and "</thinking>" in response:
-            import re
-            # Extract just the final response after thinking
-            response = re.sub(r'<thinking>.*?</thinking>', '', response, flags=re.DOTALL)
-        
+            response = re.sub(r'<thinking>.*?</thinking>\s*', '', response, flags=re.DOTALL)
+        # Some variants use <think> … </think>
+        if "<think>" in response and "</think>" in response:
+            response = re.sub(r'<think>.*?</think>\s*', '', response, flags=re.DOTALL)
+        # If it starts with a dangling <think> line, drop that first line
+        if response.lstrip().startswith("<think>"):
+            response = "\n".join(response.splitlines()[1:])
+
         return response.strip()
     
     def get_model_info(self) -> Dict[str, Any]:
