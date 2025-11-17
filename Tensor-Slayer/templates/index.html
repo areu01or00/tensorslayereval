@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tensor Slaying Toolkit</title>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="toolkit-container">
+        <header class="toolkit-header">
+            <h1>Tensor Slaying Toolkit</h1>
+            <div id="model-status-header">
+                {% if explorer_ready %}
+                    <span>Model: {{ model_display_path }}</span>
+                    <span>PatchFile: <span id="current-patchfile">none</span></span>
+                {% else %}
+                    <span style="color: red;">Explorer Not Ready. Check MODEL_PATH. Tried: {{ model_display_path }}</span>
+                {% endif %}
+            </div>
+            <nav class="global-controls">
+                <!-- Global Controls like Load Model, Load/Save PatchFile will go here -->
+                <button id="load-model-btn">Load Model</button>
+                <button id="load-patchfile-btn">Load PatchFile</button>
+                <button id="save-patchfile-btn">Save PatchFile</button>
+                <button id="export-model-btn">Export Patched Model</button>
+                <button id="settings-btn">Settings</button>
+            </nav>
+        </header>
+
+        <main class="main-content-area">
+            <div id="tensor-canvas-container">
+                <!-- Tensor Canvas: XY Axis layout of tensor thumbnails will be populated here by JS -->
+                <p style="text-align: center; padding: 20px;">Tensor Canvas Loading...</p>
+            </div>
+
+            <aside class="toolkit-sidebar">
+                <!-- Tabs for Focus View, Investigation, Patch Editor, Patch Manager etc. -->
+                <div class="sidebar-tabs">
+                    <button class="tab-button active" data-tab="focus-view-tab">Focus</button>
+                    <button class="tab-button" data-tab="investigation-tab">Investigate</button>
+                    <button class="tab-button" data-tab="patch-editor-tab">Patch Editor</button>
+                    <button class="tab-button" data-tab="patch-manager-tab">Patch Files</button>
+                </div>
+
+                <div id="focus-view-tab" class="sidebar-tab-content active">
+                    <h2>Focused Tensor Details</h2>
+                    <div id="tensor-slicing-controls" style="padding-bottom: 10px; border-bottom: 1px solid #eee; margin-bottom: 10px;">
+                        <h4>Slice Parameters (for 2D View)</h4>
+                        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                            <span>D0:</span> <input type="number" id="d0s_input" value="0" style="width: 60px;">
+                            <span>to</span> <input type="number" id="d0e_input" value="32" style="width: 60px;">
+                            <span style="margin-left: 10px;">D1:</span> <input type="number" id="d1s_input" value="0" style="width: 60px;">
+                            <span>to</span> <input type="number" id="d1e_input" value="32" style="width: 60px;">
+                            <button id="apply-slice-btn" style="margin-left: 10px;">View Slice</button>
+                        </div>
+                    </div>
+                    <div id="tensor-details-content">
+                        <p>Select a tensor from the canvas to see its details and heatmap.</p>
+                    </div>
+                    <!-- Heatmap will be rendered inside tensor-details-content or a dedicated div by scripts.js -->
+                </div>
+
+                <div id="investigation-tab" class="sidebar-tab-content">
+                    <h2>Investigation</h2>
+                    <textarea id="investigation-query" placeholder="Ask questions about the model or tensors..."></textarea>
+                    <button id="run-investigation-btn">Run Investigation</button>
+                    <div id="investigation-results">
+                        <p>Investigation results will appear here.</p>
+                    </div>
+                </div>
+
+                <div id="patch-editor-tab" class="sidebar-tab-content">
+                    <h2>Patch Editor (Hex Diffs)</h2>
+                    <div id="current-tensor-for-patching">No tensor focused for patching.</div>
+                    <div id="staged-hex-diffs-list">
+                        <p>Staged hex diffs for the focused tensor will appear here.</p>
+                    </div>
+                    <div>
+                        <h4>Direct Hex Edit (Focused Slice)</h4>
+                        <textarea id="direct-hex-input" placeholder="Offset OldHex NewHex (one per line)"></textarea>
+                        <button id="apply-direct-hex-btn">Apply Direct Hex to Stage</button>
+                    </div>
+                </div>
+
+                <div id="patch-manager-tab" class="sidebar-tab-content">
+                    <h2>Patch File Management</h2>
+                    <p>Manage .hexpatch files here.</p>
+                    <div>Current Patch File: <span id="patchfile-name-display">None</span></div>
+                    <button id="create-new-patchfile-btn">New PatchFile</button>
+                    <button id="save-current-patchfile-btn">Save Current PatchFile</button>
+                    <button id="load-patchfile-from-disk-btn">Load PatchFile from Disk</button>
+                </div>
+            </aside>
+        </main>
+
+        <footer class="toolkit-footer">
+            <input type="text" id="quick-query-input" placeholder="Quick query/filter for tensor canvas (e.g., name:*.weight dtype:float16)">
+            <button id="quick-query-btn">Apply Quick Filter</button>
+        </footer>
+    </div>
+
+    <script src="https://cdn.plot.ly/plotly-2.32.0.min.js" charset="utf-8"></script>
+    <script src="/static/scripts.js"></script>
+</body>
+</html> 

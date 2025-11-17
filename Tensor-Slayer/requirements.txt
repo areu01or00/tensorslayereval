@@ -1,0 +1,29 @@
+# Core dependencies
+torch
+numpy
+safetensors
+typer
+rich
+python-dotenv
+
+# For AI assistance
+smolagents
+
+# For tokenizer support (optional but recommended)
+transformers
+
+# For visualization
+matplotlib
+
+# For interactive plotting 
+plotly
+
+# For web interface (optional)
+gradio
+
+# For handling symbolic expressions (optional)
+sympy
+
+# For additional functionality
+requests
+pandas 
