@@ -24,12 +24,6 @@ console = Console()
 app = typer.Typer()
 
 
-class TensorModelExplorer(ModelExplorer):
-    """Thin wrapper used by the harness for programmatic access."""
-
-    def __init__(self, model_path: str):
-        super().__init__(model_path)
-
 class ModelExplorer:
     def __init__(self, model_path: str):
         self.model_path = model_path
@@ -120,6 +114,13 @@ class ModelExplorer:
                     
             except Exception as e:
                 console.print(f"[red]Error: {str(e)}[/]")
+
+
+class TensorModelExplorer(ModelExplorer):
+    """Thin wrapper used by the harness for programmatic access."""
+
+    def __init__(self, model_path: str):
+        super().__init__(model_path)
     
     def _handle_explore(self):
         """Handle explore command"""
