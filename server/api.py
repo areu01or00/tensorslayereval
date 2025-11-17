@@ -13,6 +13,7 @@ from config_manager import ConfigManager
 from hook_system import HookSystem
 from model_loader import ModelLoader
 from ai_agent import ai_agent
+from tensor_slayer_agent import get_tensor_slayer_suggestions
 from weight_patcher import WeightPatcher
 from tensor_inspector import TensorInspector
 
@@ -191,11 +192,26 @@ async def get_suggestions(payload: SuggestionPayload) -> Dict[str, Any]:
     if not tensor_stats:
         return {"suggestions": []}
 
-    suggestions = await asyncio.to_thread(
-        ai_agent.generate_modifications,
-        tensor_stats,
-        payload.capability,
-    )
+    suggestions: List[Dict[str, Any]] = []
+
+    # Prefer Tensor-Slayer suggestion pipeline; fall back to the legacy AI agent
+    model_path = _model_loader.model_path if _model_loader else None
+    if model_path:
+        try:
+            suggestions = await asyncio.to_thread(
+                get_tensor_slayer_suggestions,
+                model_path,
+                payload.capability,
+            )
+        except Exception as exc:
+            print(f"Tensor-Slayer suggestion error: {exc}")
+
+    if not suggestions:
+        suggestions = await asyncio.to_thread(
+            ai_agent.generate_modifications,
+            tensor_stats,
+            payload.capability,
+        )
     # Validate and normalize suggestions to enforce allowed operations/targets and 2D weight params only
     normalized: List[Dict[str, Any]] = []
     for s in suggestions:

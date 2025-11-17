@@ -435,6 +435,26 @@ def run_benchmark(args: argparse.Namespace) -> None:
             cached_suggestions[capability] = suggestions
             print(f"[bench] → Got {len(suggestions)} suggestions for '{capability}'")
 
+        patch_log_name = ""
+        if cached_suggestions:
+            patch_payload = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "model_path": str(model_path),
+                "apply_mode": args.apply_mode,
+                "capabilities": [
+                    {
+                        "capability": cap,
+                        "suggestion_count": len(suggs),
+                        "suggestions": suggs,
+                    }
+                    for cap, suggs in cached_suggestions.items()
+                ],
+            }
+            patch_log_path = timestamped_path(output_dir, "patches", "json")
+            patch_log_path.write_text(json.dumps(patch_payload, indent=2), encoding="utf-8")
+            patch_log_name = patch_log_path.name
+            print(f"[bench] Patch set saved → {patch_log_name}")
+
         # Auto-benchmark two-phase flow: loss screen → accuracy benchmark
         if args.auto_benchmark:
             loss_rows: List[Dict[str, Optional[str]]] = []
@@ -509,6 +529,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                             "loss_delta": f"{delta:.6f}",
                             "hook_count": str(hook_resp.get("hook_count", 0)),
                             "suggestion_count": str(len(suggestions)),
+                            "patch_set_file": patch_log_name,
                         }
                     )
 
@@ -608,6 +629,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                             "suggestion_count": str(len(suggestions)),
                             "baseline_match": "" if baseline_match is None else str(baseline_match),
                             "match": "" if match is None else str(match),
+                            "patch_set_file": patch_log_name,
                         }
                     )
 
@@ -726,6 +748,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                             "hook_count": str(hook_resp.get("hook_count", 0)),
                             "suggestion_count": str(len(suggestions)),
                             "match": "" if match is None else str(match),
+                            "patch_set_file": patch_log_name,
                         }
                     )
                 else:
@@ -769,6 +792,7 @@ def run_benchmark(args: argparse.Namespace) -> None:
                             # suggestions hash removed
                             "calibrated": str(calibrated),
                             "allow_patches": str(allow_patches),
+                            "patch_set_file": patch_log_name,
                         }
                     )
 

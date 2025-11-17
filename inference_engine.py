@@ -29,6 +29,7 @@ from model_loader import ModelLoader
 from hook_system import HookSystem
 from config_manager import ConfigManager, InferenceConfig
 from ai_agent import ai_agent
+from tensor_slayer_agent import get_tensor_slayer_suggestions
 from ui.comparison_widget import ComparisonWidget
 
 # Import tensor inspector (to be created)
@@ -331,19 +332,24 @@ class InferenceEngineApp(App):
         """Get AI suggestions"""
         self.update_status("Getting AI suggestions...")
         
-        if not ai_agent.is_available():
-            self.update_status("AI agent not available. Check API configuration.")
+        if not self.model_loader.model_path:
+            self.update_status("Model path unavailable. Load a model first.")
             return
-        
-        # Get tensor stats (simplified for now)
-        tensor_stats = self.get_tensor_stats()
-        
-        # Generate suggestions
-        suggestions = await asyncio.to_thread(
-            ai_agent.generate_modifications,
-            tensor_stats,
-            "general"
-        )
+
+        try:
+            suggestions = await asyncio.to_thread(
+                get_tensor_slayer_suggestions,
+                self.model_loader.model_path,
+                "general",
+            )
+        except Exception as exc:
+            self.update_status(f"Tensor-Slayer suggestion error: {exc}. Falling back to legacy agent...")
+            tensor_stats = self.get_tensor_stats()
+            suggestions = await asyncio.to_thread(
+                ai_agent.generate_modifications,
+                tensor_stats,
+                "general",
+            )
         
         self.current_suggestions = suggestions
         self.display_suggestions(suggestions)
